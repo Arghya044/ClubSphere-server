@@ -1043,3 +1043,147 @@ console.error('Update club status error:', error);
 res.status(500).json({ message: 'Internal server error' });
 }
 });
+
+// ==================== EVENT REGISTRATION ROUTES ====================
+app.post('/api/event-registrations/register', verifyToken, async (req, res) => {
+  try {
+    const { eventId, clubId, paymentId } = req.body;
+    if (!eventId || !clubId) {
+      return res.status(400).json({ message: 'Event ID and Club ID are required' });
+    }
+    if (!isValidObjectId(eventId)) {
+      return res.status(400).json({ message: 'Invalid event ID' });
+    }
+
+    const eventsCollection = db.collection('events');
+    const event = await eventsCollection.findOne({ _id: createObjectId(eventId) });
+    if (!event) {
+      return res.status(404).json({ message: 'Event not found' });
+    }
+
+    const registrationsCollection = db.collection('eventRegistrations');
+    const existingRegistration = await registrationsCollection.findOne({
+      eventId,
+      userEmail: req.user.email,
+    });
+
+    if (existingRegistration && existingRegistration.status === 'registered') {
+      return res.status(400).json({ message: 'You are already registered for this event' });
+    }
+
+    const requiresPayment = event.isPaid;
+    const isImmediateRegistration = !requiresPayment || Boolean(paymentId);
+    const status = isImmediateRegistration ? 'registered' : 'pending_payment';
+
+    if (existingRegistration) {
+      await registrationsCollection.updateOne(
+        { _id: existingRegistration._id },
+        {
+          $set: {
+            status,
+            paymentId: paymentId || existingRegistration.paymentId || null,
+            updatedAt: new Date(),
+          },
+        }
+      );
+      return res.status(200).json({
+        message: status === 'registered'
+          ? 'Registration confirmed'
+          : 'Added to dashboard, pay if required',
+        registrationId: existingRegistration._id,
+      });
+    }
+
+    const newRegistration = {
+      eventId,
+      userEmail: req.user.email,
+      clubId,
+      status,
+      paymentId: paymentId || null,
+      registeredAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const result = await registrationsCollection.insertOne(newRegistration);
+    res.status(201).json({
+      message: status === 'registered'
+        ? 'Registration confirmed'
+        : 'Added to dashboard, pay if required',
+      registrationId: result.insertedId,
+    });
+  } catch (error) {
+    console.error('Event registration error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+app.get('/api/event-registrations/my-registrations', verifyToken, async (req, res) => {
+try {
+const eventRegistrationsCollection = db.collection('eventRegistrations');
+const eventsCollection = db.collection('events');
+const clubsCollection = db.collection('clubs');
+const registrations = await eventRegistrationsCollection.find({ userEmail: req.user.email }).toArray();
+const registrationsWithDetails = await Promise.all(
+registrations.map(async (registration) => {
+const event = await eventsCollection.findOne({ _id: createObjectId(registration.eventId) });
+const club = await clubsCollection.findOne({ _id: createObjectId(registration.clubId) });
+return { ...registration, event, club };
+})
+);
+res.json(registrationsWithDetails);
+} catch (error) {
+console.error('Get registrations error:', error);
+res.status(500).json({ message: 'Internal server error' });
+}
+});
+
+app.get('/api/event-registrations/:id', verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid registration ID' });
+    }
+    const registrationsCollection = db.collection('eventRegistrations');
+    const eventsCollection = db.collection('events');
+    const clubsCollection = db.collection('clubs');
+    const registration = await registrationsCollection.findOne({ _id: createObjectId(id) });
+    if (!registration || registration.userEmail !== req.user.email) {
+      return res.status(404).json({ message: 'Registration not found' });
+    }
+    const event = await eventsCollection.findOne({ _id: createObjectId(registration.eventId) });
+    const club = await clubsCollection.findOne({ _id: createObjectId(registration.clubId) });
+    res.json({ ...registration, event, club });
+  } catch (error) {
+    console.error('Get registration error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+app.get('/api/event-registrations/event/:eventId', verifyToken, checkRole('clubManager'), async (req, res) => {
+try {
+const { eventId } = req.params;
+if (!isValidObjectId(eventId)) {
+return res.status(400).json({ message: 'Invalid event ID' });
+}
+const eventsCollection = db.collection('events');
+const event = await eventsCollection.findOne({ _id: createObjectId(eventId) });
+if (!event) {
+return res.status(404).json({ message: 'Event not found' });
+}
+const clubsCollection = db.collection('clubs');
+const club = await clubsCollection.findOne({ _id: createObjectId(event.clubId) });
+if (!club || club.managerEmail !== req.user.email) {
+return res.status(403).json({ message: 'Access denied' });
+}
+const eventRegistrationsCollection = db.collection('eventRegistrations');
+const usersCollection = db.collection('users');
+const registrations = await eventRegistrationsCollection.find({ eventId }).toArray();
+const registrationsWithUsers = await Promise.all(
+registrations.map(async (registration) => {
+const user = await usersCollection.findOne({ email: registration.userEmail });
+return { ...registration, user };
+})
+);
+res.json(registrationsWithUsers);
+} catch (error) {
+console.error('Get event registrations error:', error);
+res.status(500).json({ message: 'Internal server error' });
+}
+});
