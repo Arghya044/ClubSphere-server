@@ -1187,3 +1187,27 @@ console.error('Get event registrations error:', error);
 res.status(500).json({ message: 'Internal server error' });
 }
 });
+
+// ==================== ERROR HANDLERS ====================
+app.use((req, res) => {
+res.status(404).json({ message: 'Route not found' });
+});
+app.use((err, req, res, next) => {
+console.error(err.stack);
+res.status(500).json({ message: 'Something went wrong!' });
+});
+// ==================== START SERVER ====================
+async function startServer() {
+try {
+await connectDB();
+app.listen(PORT, () => {
+console.log(`🚀 Server is running on port ${PORT}`);
+});
+} catch (error) {
+console.error('Failed to start server:', error);
+process.exit(1);
+}
+}
+startServer();
+// Export for Vercel
+module.exports = app;
