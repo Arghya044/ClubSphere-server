@@ -202,3 +202,125 @@ app.patch('/api/users/:email/role', verifyToken, checkRole('admin'), async (req,
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+// ==================== CLUB ROUTES ====================
+
+app.get('/api/clubs', async (req, res) => {
+  try {
+    const { search, category, sort } = req.query;
+    const clubsCollection = db.collection('clubs');
+    let query = { status: 'approved' };
+    if (search) {
+      query.clubName = { $regex: search, $options: 'i' };
+    }
+    if (category) {
+      query.category = category;
+    }
+    let sortOption = {};
+    if (sort === 'newest') {
+      sortOption = { createdAt: -1 };
+    } else if (sort === 'oldest') {
+      sortOption = { createdAt: 1 };
+    } else if (sort === 'highestFee') {
+      sortOption = { membershipFee: -1 };
+    } else if (sort === 'lowestFee') {
+      sortOption = { membershipFee: 1 };
+    }
+    const clubs = await clubsCollection.find(query).sort(sortOption).toArray();
+    res.json(clubs);
+  } catch (error) {
+    console.error('Get clubs error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/clubs/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid club ID' });
+    }
+    const clubsCollection = db.collection('clubs');
+    const club = await clubsCollection.findOne({ _id: createObjectId(id) });
+    if (!club) {
+      return res.status(404).json({ message: 'Club not found' });
+    }
+    res.json(club);
+  } catch (error) {
+    console.error('Get club error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.post('/api/clubs', verifyToken, checkRole('clubManager'), async (req, res) => {
+  try {
+    const { clubName, description, category, location, bannerImage, membershipFee } = req.body;
+    if (!clubName || !description || !category || !location) {
+      return res.status(400).json({ message: 'All required fields must be provided' });
+    }
+    const clubsCollection = db.collection('clubs');
+    const newClub = {
+      clubName,
+      description,
+      category,
+      location,
+      bannerImage: bannerImage || '',
+      membershipFee: parseFloat(membershipFee) || 0,
+      status: 'pending',
+      managerEmail: req.user.email,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    const result = await clubsCollection.insertOne(newClub);
+    res.status(201).json({ message: 'Club created successfully. Waiting for admin approval.', clubId: result.insertedId });
+  } catch (error) {
+    console.error('Create club error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.put('/api/clubs/:id', verifyToken, checkRole('clubManager'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid club ID' });
+    }
+    const clubsCollection = db.collection('clubs');
+    const club = await clubsCollection.findOne({ _id: createObjectId(id) });
+    if (!club) {
+      return res.status(404).json({ message: 'Club not found' });
+    }
+    if (club.managerEmail !== req.user.email) {
+      return res.status(403).json({ message: 'You can only update your own clubs' });
+    }
+    const { clubName, description, category, location, bannerImage, membershipFee } = req.body;
+    const updateData = {
+      clubName: clubName || club.clubName,
+      description: description || club.description,
+      category: category || club.category,
+      location: location || club.location,
+      bannerImage: bannerImage || club.bannerImage,
+      membershipFee: membershipFee !== undefined ? parseFloat(membershipFee) : club.membershipFee,
+      updatedAt: new Date()
+    };
+    await clubsCollection.updateOne({ _id: createObjectId(id) }, { $set: updateData });
+    res.json({ message: 'Club updated successfully' });
+  } catch (error) {
+    console.error('Update club error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/clubs/manager/:email', verifyToken, checkRole('clubManager'), async (req, res) => {
+  try {
+    const { email } = req.params;
+    if (email !== req.user.email) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+    const clubsCollection = db.collection('clubs');
+    const clubs = await clubsCollection.find({ managerEmail: email }).toArray();
+    res.json(clubs);
+  } catch (error) {
+    console.error('Get manager clubs error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
