@@ -324,3 +324,157 @@ app.get('/api/clubs/manager/:email', verifyToken, checkRole('clubManager'), asyn
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+// ==================== EVENT ROUTES ====================
+
+app.get('/api/events', async (req, res) => {
+  try {
+    const { search, sort } = req.query;
+    const eventsCollection = db.collection('events');
+    let query = {};
+    if (search) {
+      query.title = { $regex: search, $options: 'i' };
+    }
+    let sortOption = {};
+    if (sort === 'newest') {
+      sortOption = { createdAt: -1 };
+    } else if (sort === 'oldest') {
+      sortOption = { createdAt: 1 };
+    } else if (sort === 'upcoming') {
+      sortOption = { eventDate: 1 };
+    }
+    const events = await eventsCollection.find(query).sort(sortOption).toArray();
+    res.json(events);
+  } catch (error) {
+    console.error('Get events error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/events/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid event ID' });
+    }
+    const eventsCollection = db.collection('events');
+    const event = await eventsCollection.findOne({ _id: createObjectId(id) });
+    if (!event) {
+      return res.status(404).json({ message: 'Event not found' });
+    }
+    res.json(event);
+  } catch (error) {
+    console.error('Get event error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.post('/api/events', verifyToken, checkRole('clubManager'), async (req, res) => {
+  try {
+    const { clubId, title, description, eventDate, location, isPaid, eventFee, maxAttendees } = req.body;
+    if (!clubId || !title || !description || !eventDate || !location) {
+      return res.status(400).json({ message: 'All required fields must be provided' });
+    }
+    if (!isValidObjectId(clubId)) {
+      return res.status(400).json({ message: 'Invalid club ID' });
+    }
+    const clubsCollection = db.collection('clubs');
+    const club = await clubsCollection.findOne({ _id: createObjectId(clubId) });
+    if (!club) {
+      return res.status(404).json({ message: 'Club not found' });
+    }
+    if (club.managerEmail !== req.user.email) {
+      return res.status(403).json({ message: 'You can only create events for your own clubs' });
+    }
+    const eventsCollection = db.collection('events');
+    const newEvent = {
+      clubId,
+      title,
+      description,
+      eventDate: new Date(eventDate),
+      location,
+      isPaid: isPaid || false,
+      eventFee: isPaid ? parseFloat(eventFee) || 0 : 0,
+      maxAttendees: maxAttendees ? parseInt(maxAttendees) : null,
+      createdAt: new Date()
+    };
+    const result = await eventsCollection.insertOne(newEvent);
+    res.status(201).json({ message: 'Event created successfully', eventId: result.insertedId });
+  } catch (error) {
+    console.error('Create event error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.put('/api/events/:id', verifyToken, checkRole('clubManager'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid event ID' });
+    }
+    const eventsCollection = db.collection('events');
+    const event = await eventsCollection.findOne({ _id: createObjectId(id) });
+    if (!event) {
+      return res.status(404).json({ message: 'Event not found' });
+    }
+    const clubsCollection = db.collection('clubs');
+    const club = await clubsCollection.findOne({ _id: createObjectId(event.clubId) });
+    if (!club || club.managerEmail !== req.user.email) {
+      return res.status(403).json({ message: 'You can only update events for your own clubs' });
+    }
+    const { title, description, eventDate, location, isPaid, eventFee, maxAttendees } = req.body;
+    const updateData = {
+      title: title || event.title,
+      description: description || event.description,
+      eventDate: eventDate ? new Date(eventDate) : event.eventDate,
+      location: location || event.location,
+      isPaid: isPaid !== undefined ? isPaid : event.isPaid,
+      eventFee: eventFee !== undefined ? parseFloat(eventFee) : event.eventFee,
+      maxAttendees: maxAttendees !== undefined ? (maxAttendees ? parseInt(maxAttendees) : null) : event.maxAttendees,
+      updatedAt: new Date()
+    };
+    await eventsCollection.updateOne({ _id: createObjectId(id) }, { $set: updateData });
+    res.json({ message: 'Event updated successfully' });
+  } catch (error) {
+    console.error('Update event error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.delete('/api/events/:id', verifyToken, checkRole('clubManager'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid event ID' });
+    }
+    const eventsCollection = db.collection('events');
+    const event = await eventsCollection.findOne({ _id: createObjectId(id) });
+    if (!event) {
+      return res.status(404).json({ message: 'Event not found' });
+    }
+    const clubsCollection = db.collection('clubs');
+    const club = await clubsCollection.findOne({ _id: createObjectId(event.clubId) });
+    if (!club || club.managerEmail !== req.user.email) {
+      return res.status(403).json({ message: 'You can only delete events for your own clubs' });
+    }
+    await eventsCollection.deleteOne({ _id: createObjectId(id) });
+    res.json({ message: 'Event deleted successfully' });
+  } catch (error) {
+    console.error('Delete event error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/events/club/:clubId', async (req, res) => {
+  try {
+    const { clubId } = req.params;
+    if (!isValidObjectId(clubId)) {
+      return res.status(400).json({ message: 'Invalid club ID' });
+    }
+    const eventsCollection = db.collection('events');
+    const events = await eventsCollection.find({ clubId }).toArray();
+    res.json(events);
+  } catch (error) {
+    console.error('Get club events error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
