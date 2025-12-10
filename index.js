@@ -150,3 +150,55 @@ app.post('/api/auth/register', async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
+// ==================== USER ROUTES ====================
+
+app.get('/api/users/me', verifyToken, async (req, res) => {
+  try {
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ email: req.user.email });
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    res.json(user);
+  } catch (error) {
+    console.error('Get user error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/users', verifyToken, checkRole('admin'), async (req, res) => {
+  try {
+    const usersCollection = db.collection('users');
+    const users = await usersCollection.find({}).toArray();
+    res.json(users);
+  } catch (error) {
+    console.error('Get users error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.patch('/api/users/:email/role', verifyToken, checkRole('admin'), async (req, res) => {
+  try {
+    const { email } = req.params;
+    const { role } = req.body;
+    if (!['admin', 'clubManager', 'member'].includes(role)) {
+      return res.status(400).json({ message: 'Invalid role' });
+    }
+    if (email === req.user.email) {
+      return res.status(403).json({ message: 'Cannot change your own role' });
+    }
+    const usersCollection = db.collection('users');
+    const result = await usersCollection.updateOne(
+      { email },
+      { $set: { role, updatedAt: new Date() } }
+    );
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    res.json({ message: 'User role updated successfully' });
+  } catch (error) {
+    console.error('Update role error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
