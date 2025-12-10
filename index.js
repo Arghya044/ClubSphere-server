@@ -35,3 +35,6 @@ const serviceAccount = {
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
 });
+
+// Stripe Setup
+const stripeClient = stripe(process.env.STRIPE_SECRET_KEY);
