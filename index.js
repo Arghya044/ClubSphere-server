@@ -89,3 +89,23 @@ async function verifyToken(req, res, next) {
     return res.status(403).json({ message: 'Invalid or expired token' });
   }
 }
+// Middleware: Check Role
+function checkRole(...allowedRoles) {
+  return async (req, res, next) => {
+    try {
+      const usersCollection = db.collection('users');
+      const user = await usersCollection.findOne({ email: req.user.email });
+      if (!user) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+      if (!allowedRoles.includes(user.role)) {
+        return res.status(403).json({ message: 'Access denied. Insufficient permissions.' });
+      }
+      req.userRole = user.role;
+      next();
+    } catch (error) {
+      console.error('Role check error:', error);
+      return res.status(500).json({ message: 'Internal server error' });
+    }
+  };
+}
