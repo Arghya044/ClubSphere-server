@@ -109,3 +109,44 @@ function checkRole(...allowedRoles) {
     }
   };
 }
+// Helper Functions
+function isValidObjectId(id) {
+  return ObjectId.isValid(id);
+}
+
+function createObjectId(id) {
+  return new ObjectId(id);
+}
+
+// Root Route
+app.get('/', (req, res) => {
+  res.json({ message: 'ClubSphere API is running!' });
+});
+
+// ==================== AUTH ROUTES ====================
+
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { name, email, photoURL } = req.body;
+    if (!name || !email) {
+      return res.status(400).json({ message: 'Name and email are required' });
+    }
+    const usersCollection = db.collection('users');
+    const existingUser = await usersCollection.findOne({ email });
+    if (existingUser) {
+      return res.status(200).json({ message: 'User already exists', user: existingUser });
+    }
+    const newUser = {
+      name,
+      email,
+      photoURL: photoURL || '',
+      role: 'member',
+      createdAt: new Date()
+    };
+    const result = await usersCollection.insertOne(newUser);
+    res.status(201).json({ message: 'User registered successfully', userId: result.insertedId });
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
