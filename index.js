@@ -965,3 +965,81 @@ app.get('/api/payments/all', verifyToken, async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+// ==================== ADMIN ROUTES ====================
+
+app.get('/api/admin/stats', verifyToken, checkRole('admin'), async (req, res) => {
+  try {
+    const usersCollection = db.collection('users');
+    const clubsCollection = db.collection('clubs');
+    const membershipsCollection = db.collection('memberships');
+    const eventsCollection = db.collection('events');
+    const paymentsCollection = db.collection('payments');
+    
+    const totalUsers = await usersCollection.countDocuments();
+    const totalClubs = await clubsCollection.countDocuments();
+    const approvedClubs = await clubsCollection.countDocuments({ status: 'approved' });
+    const pendingClubs = await clubsCollection.countDocuments({ status: 'pending' });
+    const rejectedClubs = await clubsCollection.countDocuments({ status: 'rejected' });
+    const totalMemberships = await membershipsCollection.countDocuments();
+    const totalEvents = await eventsCollection.countDocuments();
+    
+    const payments = await paymentsCollection.find({}).toArray();
+    const totalPayments = payments.reduce((sum, payment) => sum + payment.amount, 0);
+    
+    res.json({
+      totalUsers,
+      totalClubs,
+      approvedClubs,
+      pendingClubs,
+      rejectedClubs,
+      totalMemberships,
+      totalEvents,
+      totalPayments: totalPayments.toFixed(2)
+    });
+  } catch (error) {
+    console.error('Get stats error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/admin/clubs', verifyToken, checkRole('admin'), async (req, res) => {
+  try {
+    const { status } = req.query;
+    const clubsCollection = db.collection('clubs');
+    let query = {};
+    if (status) {
+      query.status = status;
+    }
+    const clubs = await clubsCollection.find(query).sort({ createdAt: -1 }).toArray();
+    res.json(clubs);
+  } catch (error) {
+    console.error('Get clubs error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.patch('/api/admin/clubs/:id/status', verifyToken, checkRole('admin'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid club ID' });
+    }
+    if (!['approved', 'rejected'].includes(status)) {
+      return res.status(400).json({ message: 'Invalid status. Use approved or rejected' });
+    }
+    const clubsCollection = db.collection('clubs');
+    const result = await clubsCollection.updateOne(
+      { _id: createObjectId(id) },
+      { $set: { status, updatedAt: new Date() } }
+    );
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ message: 'Club not found' });
+    }
+    res.json({ message: `Club ${status} successfully` });
+
+    } catch (error) {
+console.error('Update club status error:', error);
+res.status(500).json({ message: 'Internal server error' });
+}
+});
