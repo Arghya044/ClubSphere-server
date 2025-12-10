@@ -624,3 +624,344 @@ app.get('/api/memberships/club/:clubId/members', verifyToken, async (req, res) =
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
+// ==================== PAYMENT ROUTES ====================
+
+app.post('/api/payments/create-payment-intent', verifyToken, async (req, res) => {
+  try {
+    const { amount, clubId, clubName } = req.body;
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ message: 'Invalid amount' });
+    }
+    const paymentIntent = await stripeClient.paymentIntents.create({
+      amount: Math.round(amount * 100),
+      currency: 'usd',
+      metadata: {
+        userEmail: req.user.email,
+        clubId,
+        clubName,
+        type: 'membership'
+      }
+    });
+    res.json({ clientSecret: paymentIntent.client_secret, paymentIntentId: paymentIntent.id });
+  } catch (error) {
+    console.error('Create payment intent error:', error);
+    res.status(500).json({ message: 'Payment failed' });
+  }
+});
+
+app.post('/api/payments/create-membership-checkout-session', verifyToken, async (req, res) => {
+  try {
+    const { clubId, membershipId, successUrl, cancelUrl } = req.body;
+    if (!clubId || !successUrl || !cancelUrl) {
+      return res.status(400).json({ message: 'Club ID, successUrl and cancelUrl are required' });
+    }
+    if (!isValidObjectId(clubId)) {
+      return res.status(400).json({ message: 'Invalid club ID' });
+    }
+
+    const clubsCollection = db.collection('clubs');
+    const membershipsCollection = db.collection('memberships');
+
+    const club = await clubsCollection.findOne({ _id: createObjectId(clubId) });
+    if (!club) {
+      return res.status(404).json({ message: 'Club not found' });
+    }
+    if (club.membershipFee <= 0) {
+      return res.status(400).json({ message: 'No payment required for this club' });
+    }
+
+    if (membershipId && !isValidObjectId(membershipId)) {
+      return res.status(400).json({ message: 'Invalid membership ID' });
+    }
+
+    const membership = membershipId
+      ? await membershipsCollection.findOne({ _id: createObjectId(membershipId) })
+      : await membershipsCollection.findOne({ clubId, userEmail: req.user.email });
+
+    if (!membership || membership.userEmail !== req.user.email) {
+      return res.status(404).json({ message: 'Membership not found for user' });
+    }
+
+    const session = await stripeClient.checkout.sessions.create({
+      mode: 'payment',
+      customer_email: req.user.email,
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency: 'usd',
+            product_data: { name: `${club.clubName} Membership` },
+            unit_amount: Math.round(club.membershipFee * 100),
+          },
+          quantity: 1,
+        },
+      ],
+      success_url: `${successUrl}?session_id={CHECKOUT_SESSION_ID}&type=membership`,
+      cancel_url: `${cancelUrl}?type=membership`,
+      metadata: {
+        type: 'membership',
+        clubId,
+        membershipId: membership._id.toString(),
+        userEmail: req.user.email,
+      },
+    });
+
+    res.json({ url: session.url, sessionId: session.id });
+  } catch (error) {
+    console.error('Create checkout session error:', error);
+    res.status(500).json({ message: 'Failed to start checkout' });
+  }
+});
+
+app.post('/api/payments/create-event-payment-intent', verifyToken, async (req, res) => {
+  try {
+    const { amount, eventId, eventTitle } = req.body;
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ message: 'Invalid amount' });
+    }
+    const paymentIntent = await stripeClient.paymentIntents.create({
+      amount: Math.round(amount * 100),
+      currency: 'usd',
+      metadata: {
+        userEmail: req.user.email,
+        eventId,
+        eventTitle,
+        type: 'event'
+      }
+    });
+    res.json({ clientSecret: paymentIntent.client_secret, paymentIntentId: paymentIntent.id });
+  } catch (error) {
+    console.error('Create event payment intent error:', error);
+    res.status(500).json({ message: 'Payment failed' });
+  }
+});
+
+app.post('/api/payments/create-event-checkout-session', verifyToken, async (req, res) => {
+  try {
+    const { eventId, registrationId, successUrl, cancelUrl } = req.body;
+    if (!eventId || !successUrl || !cancelUrl) {
+      return res.status(400).json({ message: 'Event ID, successUrl and cancelUrl are required' });
+    }
+    if (!isValidObjectId(eventId)) {
+      return res.status(400).json({ message: 'Invalid event ID' });
+    }
+
+    const eventsCollection = db.collection('events');
+    const registrationsCollection = db.collection('eventRegistrations');
+    const event = await eventsCollection.findOne({ _id: createObjectId(eventId) });
+    if (!event) {
+      return res.status(404).json({ message: 'Event not found' });
+    }
+    if (!event.isPaid || event.eventFee <= 0) {
+      return res.status(400).json({ message: 'No payment required for this event' });
+    }
+
+    if (registrationId && !isValidObjectId(registrationId)) {
+      return res.status(400).json({ message: 'Invalid registration ID' });
+    }
+
+    const registration = registrationId
+      ? await registrationsCollection.findOne({ _id: createObjectId(registrationId) })
+      : await registrationsCollection.findOne({ eventId, userEmail: req.user.email });
+
+    if (!registration || registration.userEmail !== req.user.email) {
+      return res.status(404).json({ message: 'Registration not found for user' });
+    }
+
+    const session = await stripeClient.checkout.sessions.create({
+      mode: 'payment',
+      customer_email: req.user.email,
+      payment_method_types: ['card'],
+      line_items: [
+        {
+          price_data: {
+            currency: 'usd',
+            product_data: { name: `${event.title} Ticket` },
+            unit_amount: Math.round(event.eventFee * 100),
+          },
+          quantity: 1,
+        },
+      ],
+      success_url: `${successUrl}?session_id={CHECKOUT_SESSION_ID}&type=event`,
+      cancel_url: `${cancelUrl}?type=event`,
+      metadata: {
+        type: 'event',
+        eventId,
+        registrationId: registration._id.toString(),
+        userEmail: req.user.email,
+      },
+    });
+
+    res.json({ url: session.url, sessionId: session.id });
+  } catch (error) {
+    console.error('Create event checkout session error:', error);
+    res.status(500).json({ message: 'Failed to start checkout' });
+  }
+});
+
+app.post('/api/payments/save-payment', verifyToken, async (req, res) => {
+  try {
+    const { amount, type, clubId, eventId, stripePaymentIntentId } = req.body;
+    const paymentsCollection = db.collection('payments');
+    const payment = {
+      userEmail: req.user.email,
+      amount: parseFloat(amount),
+      type,
+      clubId: clubId || null,
+      eventId: eventId || null,
+      stripePaymentIntentId,
+      status: 'completed',
+      createdAt: new Date()
+    };
+    const result = await paymentsCollection.insertOne(payment);
+    res.status(201).json({ message: 'Payment recorded successfully', paymentId: result.insertedId });
+  } catch (error) {
+    console.error('Save payment error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.post('/api/payments/confirm-checkout', verifyToken, async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    if (!sessionId) {
+      return res.status(400).json({ message: 'sessionId is required' });
+    }
+
+    const session = await stripeClient.checkout.sessions.retrieve(sessionId);
+    if (!session) {
+      return res.status(404).json({ message: 'Session not found' });
+    }
+    if (session.payment_status !== 'paid') {
+      return res.status(400).json({ message: 'Payment not completed' });
+    }
+    if (session.metadata?.userEmail !== req.user.email) {
+      return res.status(403).json({ message: 'This session does not belong to the user' });
+    }
+
+    const stripePaymentIntentId = session.payment_intent;
+    const amount = session.amount_total ? session.amount_total / 100 : 0;
+    const type = session.metadata?.type;
+
+    const paymentsCollection = db.collection('payments');
+    const membershipsCollection = db.collection('memberships');
+    const registrationsCollection = db.collection('eventRegistrations');
+
+    const existingPayment = await paymentsCollection.findOne({ stripePaymentIntentId });
+    if (!existingPayment) {
+      await paymentsCollection.insertOne({
+        userEmail: req.user.email,
+        amount,
+        type,
+        clubId: session.metadata?.clubId || null,
+        eventId: session.metadata?.eventId || null,
+        stripePaymentIntentId,
+        status: 'completed',
+        createdAt: new Date(),
+      });
+    }
+
+    if (type === 'membership') {
+      const { clubId, membershipId } = session.metadata;
+      const membershipFilter = membershipId && isValidObjectId(membershipId)
+        ? { _id: createObjectId(membershipId) }
+        : { clubId, userEmail: req.user.email };
+
+      const updateResult = await membershipsCollection.updateOne(
+        membershipFilter,
+        {
+          $set: {
+            status: 'active',
+            paymentId: stripePaymentIntentId,
+            updatedAt: new Date(),
+          },
+        },
+        { upsert: true }
+      );
+
+      // If we upserted because membership was missing, ensure required fields
+      if (updateResult.upsertedCount > 0) {
+        await membershipsCollection.updateOne(
+          { _id: updateResult.upsertedId },
+          {
+            $setOnInsert: {
+              userEmail: req.user.email,
+              clubId,
+              joinedAt: new Date(),
+              expiresAt: null,
+            },
+          }
+        );
+      }
+
+      return res.json({ message: 'Membership payment confirmed' });
+    }
+
+    if (type === 'event') {
+      const { eventId, registrationId } = session.metadata;
+      const registrationFilter = registrationId && isValidObjectId(registrationId)
+        ? { _id: createObjectId(registrationId) }
+        : { eventId, userEmail: req.user.email };
+
+      const updateResult = await registrationsCollection.updateOne(
+        registrationFilter,
+        {
+          $set: {
+            status: 'registered',
+            paymentId: stripePaymentIntentId,
+            updatedAt: new Date(),
+          },
+        },
+        { upsert: true }
+      );
+
+      if (updateResult.upsertedCount > 0) {
+        await registrationsCollection.updateOne(
+          { _id: updateResult.upsertedId },
+          {
+            $setOnInsert: {
+              eventId,
+              userEmail: req.user.email,
+              registeredAt: new Date(),
+            },
+          }
+        );
+      }
+
+      return res.json({ message: 'Event payment confirmed' });
+    }
+
+    res.json({ message: 'Payment confirmed' });
+  } catch (error) {
+    console.error('Confirm checkout error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/payments/my-payments', verifyToken, async (req, res) => {
+  try {
+    const paymentsCollection = db.collection('payments');
+    const payments = await paymentsCollection.find({ userEmail: req.user.email }).sort({ createdAt: -1 }).toArray();
+    res.json(payments);
+  } catch (error) {
+    console.error('Get payments error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/payments/all', verifyToken, async (req, res) => {
+  try {
+    const usersCollection = db.collection('users');
+    const user = await usersCollection.findOne({ email: req.user.email });
+    if (user.role !== 'admin') {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+    const paymentsCollection = db.collection('payments');
+    const payments = await paymentsCollection.find({}).sort({ createdAt: -1 }).toArray();
+    res.json(payments);
+  } catch (error) {
+    console.error('Get all payments error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
