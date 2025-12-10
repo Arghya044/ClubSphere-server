@@ -38,3 +38,39 @@ admin.initializeApp({
 
 // Stripe Setup
 const stripeClient = stripe(process.env.STRIPE_SECRET_KEY);
+
+// Connect to MongoDB and Create Super Admin
+async function connectDB() {
+  try {
+    await client.connect();
+    db = client.db(process.env.DB_NAME);
+    console.log("✅ Connected to MongoDB successfully!");
+    await createSuperAdmin();
+  } catch (error) {
+    console.error("❌ MongoDB connection error:", error);
+    process.exit(1);
+  }
+}
+
+async function createSuperAdmin() {
+  try {
+    const usersCollection = db.collection('users');
+    const superAdminEmail = process.env.SUPER_ADMIN_EMAIL;
+    const existingSuperAdmin = await usersCollection.findOne({ email: superAdminEmail });
+    
+    if (!existingSuperAdmin) {
+      await usersCollection.insertOne({
+        name: "Super Admin",
+        email: superAdminEmail,
+        role: "admin",
+        photoURL: "https://i.ibb.co/2yfvQvz/admin-avatar.png",
+        createdAt: new Date()
+      });
+      console.log("✅ Super Admin created successfully!");
+    } else {
+      console.log("ℹ️ Super Admin already exists");
+    }
+  } catch (error) {
+    console.error("❌ Error creating super admin:", error);
+  }
+}
