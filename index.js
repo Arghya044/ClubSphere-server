@@ -478,3 +478,149 @@ app.get('/api/events/club/:clubId', async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
+// ==================== MEMBERSHIP ROUTES ====================
+
+app.post('/api/memberships/join', verifyToken, async (req, res) => {
+  try {
+    const { clubId, paymentId } = req.body;
+    if (!clubId) {
+      return res.status(400).json({ message: 'Club ID is required' });
+    }
+    if (!isValidObjectId(clubId)) {
+      return res.status(400).json({ message: 'Invalid club ID' });
+    }
+
+    const clubsCollection = db.collection('clubs');
+    const club = await clubsCollection.findOne({ _id: createObjectId(clubId) });
+    if (!club) {
+      return res.status(404).json({ message: 'Club not found' });
+    }
+    if (club.status !== 'approved') {
+      return res.status(400).json({ message: 'Club is not approved yet' });
+    }
+
+    const membershipsCollection = db.collection('memberships');
+    const existingMembership = await membershipsCollection.findOne({
+      userEmail: req.user.email,
+      clubId,
+    });
+
+    if (existingMembership && existingMembership.status === 'active') {
+      return res.status(400).json({ message: 'You are already a member of this club' });
+    }
+
+    // When payment is required but not yet completed, keep membership pending so the user can pay later.
+    const requiresPayment = club.membershipFee > 0;
+    const isImmediateActivation = !requiresPayment || Boolean(paymentId);
+    const status = isImmediateActivation ? 'active' : 'pending_payment';
+
+    if (existingMembership) {
+      // Update existing pending membership if payment just completed
+      const updateFields = {
+        status,
+        paymentId: paymentId || existingMembership.paymentId || null,
+        updatedAt: new Date(),
+      };
+      await membershipsCollection.updateOne(
+        { _id: existingMembership._id },
+        { $set: updateFields }
+      );
+      return res.status(200).json({
+        message: status === 'active'
+          ? 'Membership activated successfully'
+          : 'Added to dashboard, pay if required',
+        membershipId: existingMembership._id,
+      });
+    }
+
+    const newMembership = {
+      userEmail: req.user.email,
+      clubId,
+      status,
+      paymentId: paymentId || null,
+      joinedAt: new Date(),
+      updatedAt: new Date(),
+      expiresAt: null,
+    };
+    const result = await membershipsCollection.insertOne(newMembership);
+
+    return res.status(201).json({
+      message: status === 'active'
+        ? 'Membership activated successfully'
+        : 'Added to dashboard, pay if required',
+      membershipId: result.insertedId,
+    });
+  } catch (error) {
+    console.error('Join club error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/memberships/my-memberships', verifyToken, async (req, res) => {
+  try {
+    const membershipsCollection = db.collection('memberships');
+    const clubsCollection = db.collection('clubs');
+    const memberships = await membershipsCollection.find({ userEmail: req.user.email }).toArray();
+    const membershipsWithClubs = await Promise.all(
+      memberships.map(async (membership) => {
+        const club = await clubsCollection.findOne({ _id: createObjectId(membership.clubId) });
+        return { ...membership, club };
+      })
+    );
+    res.json(membershipsWithClubs);
+  } catch (error) {
+    console.error('Get memberships error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/memberships/:id', verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid membership ID' });
+    }
+    const membershipsCollection = db.collection('memberships');
+    const clubsCollection = db.collection('clubs');
+    const membership = await membershipsCollection.findOne({ _id: createObjectId(id) });
+    if (!membership || membership.userEmail !== req.user.email) {
+      return res.status(404).json({ message: 'Membership not found' });
+    }
+    const club = await clubsCollection.findOne({ _id: createObjectId(membership.clubId) });
+    res.json({ ...membership, club });
+  } catch (error) {
+    console.error('Get membership error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+app.get('/api/memberships/club/:clubId/members', verifyToken, async (req, res) => {
+  try {
+    const { clubId } = req.params;
+    if (!isValidObjectId(clubId)) {
+      return res.status(400).json({ message: 'Invalid club ID' });
+    }
+    const clubsCollection = db.collection('clubs');
+    const club = await clubsCollection.findOne({ _id: createObjectId(clubId) });
+    if (!club) {
+      return res.status(404).json({ message: 'Club not found' });
+    }
+    if (club.managerEmail !== req.user.email) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+    const membershipsCollection = db.collection('memberships');
+    const usersCollection = db.collection('users');
+    const memberships = await membershipsCollection.find({ clubId }).toArray();
+    const membersWithDetails = await Promise.all(
+      memberships.map(async (membership) => {
+        const user = await usersCollection.findOne({ email: membership.userEmail });
+        return { ...membership, user };
+      })
+    );
+    res.json(membersWithDetails);
+  } catch (error) {
+    console.error('Get club members error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
