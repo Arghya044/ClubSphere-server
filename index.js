@@ -74,6 +74,7 @@ async function createSuperAdmin() {
     console.error("❌ Error creating super admin:", error);
   }
 }
+
 // Middleware: Verify Firebase Token
 async function verifyToken(req, res, next) {
   try {
@@ -89,6 +90,7 @@ async function verifyToken(req, res, next) {
     return res.status(403).json({ message: 'Invalid or expired token' });
   }
 }
+
 // Middleware: Check Role
 function checkRole(...allowedRoles) {
   return async (req, res, next) => {
@@ -109,6 +111,7 @@ function checkRole(...allowedRoles) {
     }
   };
 }
+
 // Helper Functions
 function isValidObjectId(id) {
   return ObjectId.isValid(id);
@@ -156,10 +159,22 @@ app.post('/api/auth/register', async (req, res) => {
 app.get('/api/users/me', verifyToken, async (req, res) => {
   try {
     const usersCollection = db.collection('users');
-    const user = await usersCollection.findOne({ email: req.user.email });
+    let user = await usersCollection.findOne({ email: req.user.email });
+
+    // Automatically create a basic member record if the Firebase user is new
     if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+      const newUser = {
+        name: req.user.name || req.user.email?.split('@')[0] || 'User',
+        email: req.user.email,
+        photoURL: req.user.picture || '',
+        role: 'member',
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+      const result = await usersCollection.insertOne(newUser);
+      user = { _id: result.insertedId, ...newUser };
     }
+
     res.json(user);
   } catch (error) {
     console.error('Get user error:', error);
@@ -202,6 +217,7 @@ app.patch('/api/users/:email/role', verifyToken, checkRole('admin'), async (req,
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
 // ==================== CLUB ROUTES ====================
 
 app.get('/api/clubs', async (req, res) => {
@@ -324,6 +340,7 @@ app.get('/api/clubs/manager/:email', verifyToken, checkRole('clubManager'), asyn
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
 // ==================== EVENT ROUTES ====================
 
 app.get('/api/events', async (req, res) => {
@@ -965,6 +982,7 @@ app.get('/api/payments/all', verifyToken, async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
 // ==================== ADMIN ROUTES ====================
 
 app.get('/api/admin/stats', verifyToken, checkRole('admin'), async (req, res) => {
@@ -1043,7 +1061,6 @@ console.error('Update club status error:', error);
 res.status(500).json({ message: 'Internal server error' });
 }
 });
-
 // ==================== EVENT REGISTRATION ROUTES ====================
 app.post('/api/event-registrations/register', verifyToken, async (req, res) => {
   try {
@@ -1187,7 +1204,6 @@ console.error('Get event registrations error:', error);
 res.status(500).json({ message: 'Internal server error' });
 }
 });
-
 // ==================== ERROR HANDLERS ====================
 app.use((req, res) => {
 res.status(404).json({ message: 'Route not found' });
