@@ -12,52 +12,116 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// MongoDB Client
+// ==================== SERVERLESS OPTIMIZATIONS ====================
+// Cache connections across warm invocations to reduce cold start time
+
+// MongoDB Client with connection caching for serverless
 const uri = process.env.MONGODB_URI;
+let cachedClient = null;
+let cachedDb = null;
+
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
     strict: true,
     deprecationErrors: true,
-  }
+  },
+  // Serverless optimizations
+  maxPoolSize: 10,           // Limit connections for serverless
+  minPoolSize: 1,            // Keep at least one connection ready
+  maxIdleTimeMS: 30000,      // Close idle connections after 30s
+  serverSelectionTimeoutMS: 5000, // Faster timeout for server selection
+  socketTimeoutMS: 45000,    // Socket timeout
+  connectTimeoutMS: 10000,   // Connection timeout
 });
 
+// Cached db reference
 let db;
 
-// Firebase Admin Setup
-const serviceAccount = {
-  type: "service_account",
-  project_id: process.env.FIREBASE_PROJECT_ID,
-  private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-  client_email: process.env.FIREBASE_CLIENT_EMAIL,
+// Lazy Firebase Admin initialization (only when needed)
+let firebaseInitialized = false;
+const initializeFirebase = () => {
+  if (firebaseInitialized) return;
+
+  const serviceAccount = {
+    type: "service_account",
+    project_id: process.env.FIREBASE_PROJECT_ID,
+    private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    client_email: process.env.FIREBASE_CLIENT_EMAIL,
+  };
+
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+
+  firebaseInitialized = true;
+  console.log("✅ Firebase Admin initialized");
 };
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
+// Lazy Stripe initialization
+let stripeClient = null;
+const getStripeClient = () => {
+  if (!stripeClient) {
+    stripeClient = stripe(process.env.STRIPE_SECRET_KEY);
+    console.log("✅ Stripe client initialized");
+  }
+  return stripeClient;
+};
 
-// Stripe Setup
-const stripeClient = stripe(process.env.STRIPE_SECRET_KEY);
-
-// Connect to MongoDB and Create Super Admin
+// Optimized MongoDB connection with caching for serverless
 async function connectDB() {
+  // Return cached connection if available
+  if (cachedDb) {
+    return cachedDb;
+  }
+
   try {
-    await client.connect();
-    db = client.db(process.env.DB_NAME);
-    console.log("✅ Connected to MongoDB successfully!");
-    await createSuperAdmin();
+    if (!cachedClient) {
+      await client.connect();
+      cachedClient = client;
+      console.log("✅ New MongoDB connection established");
+    }
+
+    cachedDb = cachedClient.db(process.env.DB_NAME);
+    db = cachedDb;
+
+    // Create super admin in background (don't block startup)
+    createSuperAdmin().catch(err => console.error("Super admin creation error:", err));
+
+    return cachedDb;
   } catch (error) {
     console.error("❌ MongoDB connection error:", error);
-    process.exit(1);
+    // Reset cache on error
+    cachedClient = null;
+    cachedDb = null;
+    throw error;
   }
 }
+
+// Middleware to ensure DB connection (for serverless)
+const ensureDbConnection = async (req, res, next) => {
+  try {
+    if (!db) {
+      await connectDB();
+    }
+    // Initialize Firebase lazily (only when API routes are hit)
+    initializeFirebase();
+    next();
+  } catch (error) {
+    console.error("DB connection middleware error:", error);
+    res.status(503).json({ message: 'Database connection failed. Please retry.' });
+  }
+};
+
+// Apply DB connection middleware to all API routes
+app.use('/api', ensureDbConnection);
 
 async function createSuperAdmin() {
   try {
     const usersCollection = db.collection('users');
     const superAdminEmail = process.env.SUPER_ADMIN_EMAIL;
     const existingSuperAdmin = await usersCollection.findOne({ email: superAdminEmail });
-    
+
     if (!existingSuperAdmin) {
       await usersCollection.insertOne({
         name: "Super Admin",
@@ -121,9 +185,25 @@ function createObjectId(id) {
   return new ObjectId(id);
 }
 
-// Root Route
-app.get('/', (req, res) => {
-  res.json({ message: 'ClubSphere API is running!' });
+// Root Route - Used for health checks and pre-warming
+app.get('/', async (req, res) => {
+  // Trigger lazy initialization on health check
+  try {
+    if (!db) {
+      await connectDB();
+    }
+    res.json({
+      message: 'ClubSphere API is running!',
+      status: 'ready',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(503).json({
+      message: 'Server starting up...',
+      status: 'warming',
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
 // ==================== AUTH ROUTES ====================
@@ -642,7 +722,6 @@ app.get('/api/memberships/club/:clubId/members', verifyToken, async (req, res) =
   }
 });
 
-
 app.delete('/api/memberships/:id', verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -680,7 +759,7 @@ app.post('/api/payments/create-payment-intent', verifyToken, async (req, res) =>
     if (!amount || amount <= 0) {
       return res.status(400).json({ message: 'Invalid amount' });
     }
-    const paymentIntent = await stripeClient.paymentIntents.create({
+    const paymentIntent = await getStripeClient().paymentIntents.create({
       amount: Math.round(amount * 100),
       currency: 'usd',
       metadata: {
@@ -730,7 +809,7 @@ app.post('/api/payments/create-membership-checkout-session', verifyToken, async 
       return res.status(404).json({ message: 'Membership not found for user' });
     }
 
-    const session = await stripeClient.checkout.sessions.create({
+    const session = await getStripeClient().checkout.sessions.create({
       mode: 'payment',
       customer_email: req.user.email,
       payment_method_types: ['card'],
@@ -767,7 +846,7 @@ app.post('/api/payments/create-event-payment-intent', verifyToken, async (req, r
     if (!amount || amount <= 0) {
       return res.status(400).json({ message: 'Invalid amount' });
     }
-    const paymentIntent = await stripeClient.paymentIntents.create({
+    const paymentIntent = await getStripeClient().paymentIntents.create({
       amount: Math.round(amount * 100),
       currency: 'usd',
       metadata: {
@@ -816,7 +895,7 @@ app.post('/api/payments/create-event-checkout-session', verifyToken, async (req,
       return res.status(404).json({ message: 'Registration not found for user' });
     }
 
-    const session = await stripeClient.checkout.sessions.create({
+    const session = await getStripeClient().checkout.sessions.create({
       mode: 'payment',
       customer_email: req.user.email,
       payment_method_types: ['card'],
@@ -876,7 +955,7 @@ app.post('/api/payments/confirm-checkout', verifyToken, async (req, res) => {
       return res.status(400).json({ message: 'sessionId is required' });
     }
 
-    const session = await stripeClient.checkout.sessions.retrieve(sessionId);
+    const session = await getStripeClient().checkout.sessions.retrieve(sessionId);
     if (!session) {
       return res.status(404).json({ message: 'Session not found' });
     }
@@ -1022,7 +1101,7 @@ app.get('/api/admin/stats', verifyToken, checkRole('admin'), async (req, res) =>
     const membershipsCollection = db.collection('memberships');
     const eventsCollection = db.collection('events');
     const paymentsCollection = db.collection('payments');
-    
+
     const totalUsers = await usersCollection.countDocuments();
     const totalClubs = await clubsCollection.countDocuments();
     const approvedClubs = await clubsCollection.countDocuments({ status: 'approved' });
@@ -1030,10 +1109,10 @@ app.get('/api/admin/stats', verifyToken, checkRole('admin'), async (req, res) =>
     const rejectedClubs = await clubsCollection.countDocuments({ status: 'rejected' });
     const totalMemberships = await membershipsCollection.countDocuments();
     const totalEvents = await eventsCollection.countDocuments();
-    
+
     const payments = await paymentsCollection.find({}).toArray();
     const totalPayments = payments.reduce((sum, payment) => sum + payment.amount, 0);
-    
+
     res.json({
       totalUsers,
       totalClubs,
@@ -1085,13 +1164,14 @@ app.patch('/api/admin/clubs/:id/status', verifyToken, checkRole('admin'), async 
       return res.status(404).json({ message: 'Club not found' });
     }
     res.json({ message: `Club ${status} successfully` });
-
-    } catch (error) {
-console.error('Update club status error:', error);
-res.status(500).json({ message: 'Internal server error' });
-}
+  } catch (error) {
+    console.error('Update club status error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
 });
+
 // ==================== EVENT REGISTRATION ROUTES ====================
+
 app.post('/api/event-registrations/register', verifyToken, async (req, res) => {
   try {
     const { eventId, clubId, paymentId } = req.body;
@@ -1162,24 +1242,25 @@ app.post('/api/event-registrations/register', verifyToken, async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
 app.get('/api/event-registrations/my-registrations', verifyToken, async (req, res) => {
-try {
-const eventRegistrationsCollection = db.collection('eventRegistrations');
-const eventsCollection = db.collection('events');
-const clubsCollection = db.collection('clubs');
-const registrations = await eventRegistrationsCollection.find({ userEmail: req.user.email }).toArray();
-const registrationsWithDetails = await Promise.all(
-registrations.map(async (registration) => {
-const event = await eventsCollection.findOne({ _id: createObjectId(registration.eventId) });
-const club = await clubsCollection.findOne({ _id: createObjectId(registration.clubId) });
-return { ...registration, event, club };
-})
-);
-res.json(registrationsWithDetails);
-} catch (error) {
-console.error('Get registrations error:', error);
-res.status(500).json({ message: 'Internal server error' });
-}
+  try {
+    const eventRegistrationsCollection = db.collection('eventRegistrations');
+    const eventsCollection = db.collection('events');
+    const clubsCollection = db.collection('clubs');
+    const registrations = await eventRegistrationsCollection.find({ userEmail: req.user.email }).toArray();
+    const registrationsWithDetails = await Promise.all(
+      registrations.map(async (registration) => {
+        const event = await eventsCollection.findOne({ _id: createObjectId(registration.eventId) });
+        const club = await clubsCollection.findOne({ _id: createObjectId(registration.clubId) });
+        return { ...registration, event, club };
+      })
+    );
+    res.json(registrationsWithDetails);
+  } catch (error) {
+    console.error('Get registrations error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
 });
 
 app.get('/api/event-registrations/:id', verifyToken, async (req, res) => {
@@ -1203,57 +1284,66 @@ app.get('/api/event-registrations/:id', verifyToken, async (req, res) => {
     res.status(500).json({ message: 'Internal server error' });
   }
 });
+
 app.get('/api/event-registrations/event/:eventId', verifyToken, checkRole('clubManager'), async (req, res) => {
-try {
-const { eventId } = req.params;
-if (!isValidObjectId(eventId)) {
-return res.status(400).json({ message: 'Invalid event ID' });
-}
-const eventsCollection = db.collection('events');
-const event = await eventsCollection.findOne({ _id: createObjectId(eventId) });
-if (!event) {
-return res.status(404).json({ message: 'Event not found' });
-}
-const clubsCollection = db.collection('clubs');
-const club = await clubsCollection.findOne({ _id: createObjectId(event.clubId) });
-if (!club || club.managerEmail !== req.user.email) {
-return res.status(403).json({ message: 'Access denied' });
-}
-const eventRegistrationsCollection = db.collection('eventRegistrations');
-const usersCollection = db.collection('users');
-const registrations = await eventRegistrationsCollection.find({ eventId }).toArray();
-const registrationsWithUsers = await Promise.all(
-registrations.map(async (registration) => {
-const user = await usersCollection.findOne({ email: registration.userEmail });
-return { ...registration, user };
-})
-);
-res.json(registrationsWithUsers);
-} catch (error) {
-console.error('Get event registrations error:', error);
-res.status(500).json({ message: 'Internal server error' });
-}
+  try {
+    const { eventId } = req.params;
+    if (!isValidObjectId(eventId)) {
+      return res.status(400).json({ message: 'Invalid event ID' });
+    }
+    const eventsCollection = db.collection('events');
+    const event = await eventsCollection.findOne({ _id: createObjectId(eventId) });
+    if (!event) {
+      return res.status(404).json({ message: 'Event not found' });
+    }
+    const clubsCollection = db.collection('clubs');
+    const club = await clubsCollection.findOne({ _id: createObjectId(event.clubId) });
+    if (!club || club.managerEmail !== req.user.email) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+    const eventRegistrationsCollection = db.collection('eventRegistrations');
+    const usersCollection = db.collection('users');
+    const registrations = await eventRegistrationsCollection.find({ eventId }).toArray();
+    const registrationsWithUsers = await Promise.all(
+      registrations.map(async (registration) => {
+        const user = await usersCollection.findOne({ email: registration.userEmail });
+        return { ...registration, user };
+      })
+    );
+    res.json(registrationsWithUsers);
+  } catch (error) {
+    console.error('Get event registrations error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
 });
+
 // ==================== ERROR HANDLERS ====================
+
 app.use((req, res) => {
-res.status(404).json({ message: 'Route not found' });
+  res.status(404).json({ message: 'Route not found' });
 });
+
 app.use((err, req, res, next) => {
-console.error(err.stack);
-res.status(500).json({ message: 'Something went wrong!' });
+  console.error(err.stack);
+  res.status(500).json({ message: 'Something went wrong!' });
 });
-// ==================== START SERVER ====================
-async function startServer() {
-try {
-await connectDB();
-app.listen(PORT, () => {
-console.log(`🚀 Server is running on port ${PORT}`);
-});
-} catch (error) {
-console.error('Failed to start server:', error);
-process.exit(1);
+
+// ==================== START SERVER (for local development) ====================
+// For Vercel, the app is exported and this won't run
+if (process.env.NODE_ENV !== 'production') {
+  async function startServer() {
+    try {
+      await connectDB();
+      app.listen(PORT, () => {
+        console.log(`🚀 Server is running on port ${PORT}`);
+      });
+    } catch (error) {
+      console.error('Failed to start server:', error);
+      process.exit(1);
+    }
+  }
+  startServer();
 }
-}
-startServer();
-// Export for Vercel
+
+// Export for Vercel serverless
 module.exports = app;
